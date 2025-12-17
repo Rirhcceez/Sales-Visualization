@@ -5,32 +5,44 @@ import numpy as np
 from itertools import combinations
 from collections import Counter
 
-# --- 1. Page Configuration ---
+# --- 1. Page Configuration & Definitions ---
 st.set_page_config(page_title="Moto Parts Sales Analytics", layout="wide")
 
 st.title("🏍️ Motorcycle Parts Sales Dashboard")
 st.markdown("Analytic overview of Sales Performance, Trends, and Product consistency.")
 
+# Define Category Mapping
+CATEGORY_MAP = {
+    "001": "Tire",
+    "002": "Rubber",
+    "003": "Motor Oil",
+    "004": "Battery",
+    "005": "Spark Plug",
+    "006": "Sprocket",
+    "007": "Motorcycle Belt",
+    "008": "Etc",
+    "009": "Brake"
+}
+
 # --- 2. Data Loading & Preprocessing ---
 @st.cache_data
-
 def load_data():
-    # NOTE: Update these paths to where your actual CSV files are located
     try:
-        df_items = pd.read_csv('data/postgresql_order_items_exported.csv')
-        df_orders = pd.read_csv('data/postgresql_orders_exported.csv')
+        # NOTE: Update these paths if your files are in a different folder
+        df_items = pd.read_csv('postgresql_order_items_exported.csv')
+        df_orders = pd.read_csv('postgresql_orders_exported.csv')
     except FileNotFoundError:
         st.error("CSV files not found. Please ensure 'postgresql_order_items_exported.csv' and 'postgresql_orders_exported.csv' are in the same folder.")
-        return None, None
+        return None, None, None
 
     # -- Cleaning & Merging --
     # Filter columns
     df_items = df_items[['order_id', 'selling_sku_id', 'quantity', 'unit_price', 'subtotal']]
     df_orders = df_orders[['order_id', 'platform_name', 'order_date', 'total_amount']]
 
-    # Add category_id
+    # Add category_id and map to Category Name
     df_items['category_id'] = df_items['selling_sku_id'].str[:3]
-    
+    df_items['category_name'] = df_items['category_id'].map(CATEGORY_MAP).fillna("Unknown")
 
     # Date conversion
     df_orders['order_date'] = pd.to_datetime(df_orders['order_date'])
@@ -59,7 +71,7 @@ if df_merged is not None:
     # Filter Logic
     start_month, end_month = selected_month
     
-    # Apply filters to Main DataFrames
+    # Apply filters
     mask_orders = (
         (df_orders['platform_name'].isin(selected_platforms)) & 
         (df_orders['order_month'] >= start_month) & 
@@ -77,7 +89,6 @@ if df_merged is not None:
     # --- 4. Overview Section (KPIs) ---
     st.header("1. Sales Overview")
     
-    # Calculate KPIs
     total_revenue = df_orders_filtered['total_amount'].sum()
     total_orders = df_orders_filtered['order_id'].nunique()
     
@@ -114,29 +125,25 @@ if df_merged is not None:
         with col_t2:
             st.subheader("Platform Share")
             
-            # 1. Add the Toggle (Radio button acts as a switch)
+            # -- Toggle Button Logic --
             view_metric = st.radio(
                 "View Share By:", 
                 ["Orders", "Sales"], 
                 horizontal=True,
-                label_visibility="collapsed"  # Hides the label for a cleaner look
+                label_visibility="collapsed"
             )
 
-            # 2. Conditional Logic based on selection
             if view_metric == "Orders":
-                # Count orders (Existing logic)
                 platform_data = df_orders_filtered['platform_name'].value_counts().reset_index()
-                platform_data.columns = ['platform_name', 'value'] # Rename for consistency
+                platform_data.columns = ['platform_name', 'value']
                 chart_title = "Share of Orders by Platform"
                 text_info = "percent+label"
             else:
-                # Sum sales (New logic)
                 platform_data = df_orders_filtered.groupby('platform_name')['total_amount'].sum().reset_index()
                 platform_data.columns = ['platform_name', 'value']
                 chart_title = "Share of Sales (Revenue) by Platform"
-                text_info = "percent+label+value" # Value is useful for revenue
+                text_info = "percent+label+value"
 
-            # 3. Create the Chart
             fig_pie = px.pie(
                 platform_data, 
                 values='value', 
@@ -144,18 +151,26 @@ if df_merged is not None:
                 color='platform_name',
                 color_discrete_map={"Tiktok": "#FE2C55", "Shopee": "#EE4D2D", "Lazada": "#0f146d"},
                 title=chart_title,
-                hole=0.4 # Optional: Makes it a donut chart (looks cleaner)
+                hole=0.4
             )
-            
-            # Update hover/text info
-            fig_pie.update_traces(textposition='inside', textinfo="percent+value")
-            
+            fig_pie.update_traces(textposition='inside', textinfo=text_info)
             st.plotly_chart(fig_pie, use_container_width=True)
-
+        
+        # -- Category Chart (Updated with Names) --
         st.subheader("Category Performance")
-        cat_sales = df_merged_filtered.groupby('category_id')['subtotal'].sum().reset_index().sort_values('subtotal', ascending=False)
-        fig_cat = px.bar(cat_sales, x='category_id', y='subtotal', text_auto='.2s', 
-                        title="Best Selling Categories (Revenue)")
+        
+        # Group by 'category_name' instead of ID
+        cat_sales = df_merged_filtered.groupby('category_name')['subtotal'].sum().reset_index().sort_values('subtotal', ascending=False)
+        
+        fig_cat = px.bar(
+            cat_sales, 
+            x='category_name', 
+            y='subtotal', 
+            text_auto='.2s', 
+            title="Best Selling Categories (Revenue)",
+            color='subtotal',
+            color_continuous_scale='Blues'
+        )
         st.plotly_chart(fig_cat, use_container_width=True)
 
     # === TAB 2: Product Analysis (Hero & Consistency) ===
@@ -164,18 +179,15 @@ if df_merged is not None:
         st.markdown("The **Current Streak** shows how many recent consecutive months this product has been sold. High streak = Consistent Demand.")
 
         # 1. Total Sales per SKU
-        sku_stats = df_merged_filtered.groupby('selling_sku_id').agg({
+        sku_stats = df_merged_filtered.groupby(['selling_sku_id', 'category_name']).agg({
             'subtotal': 'sum',
             'quantity': 'sum',
-            'order_id': 'nunique' # Frequency
+            'order_id': 'nunique'
         }).reset_index()
 
-        # 2. Logic for Streak Count (Consistency)
-        # Create a pivot table: Index=SKU, Columns=Month, Values=Revenue
+        # 2. Logic for Streak Count
         pivot_monthly = df_merged.pivot_table(index='selling_sku_id', columns='order_month', values='subtotal', aggfunc='sum').fillna(0)
-        
-        # Calculate streak for each product
-        latest_months = sorted(df_merged['order_month'].unique(), reverse=True) # ['2025-11', '2025-10', ...]
+        latest_months = sorted(df_merged['order_month'].unique(), reverse=True)
         
         streaks = {}
         for sku, row in pivot_monthly.iterrows():
@@ -184,10 +196,9 @@ if df_merged is not None:
                 if row[month] > 0:
                     current_streak += 1
                 else:
-                    break # Stop counting if we hit a month with 0 sales
+                    break 
             streaks[sku] = current_streak
 
-        # Merge Streak data back
         df_streaks = pd.DataFrame(list(streaks.items()), columns=['selling_sku_id', 'current_streak'])
         final_product_df = sku_stats.merge(df_streaks, on='selling_sku_id')
 
@@ -195,16 +206,18 @@ if df_merged is not None:
         st.dataframe(
             final_product_df.sort_values(by='subtotal', ascending=False).style.format({'subtotal': "฿{:,.0f}"}),
             column_config={
+                "category_name": "Category",
                 "current_streak": st.column_config.ProgressColumn(
                     "Consistency Streak (Months)",
-                    help="Number of consecutive months with sales working backwards from today",
                     format="%d",
                     min_value=0,
                     max_value=len(latest_months),
                 ),
-                "subtotal": "Total Revenue"
+                "subtotal": "Total Revenue",
+                "quantity": "Units Sold"
             },
-            use_container_width=True
+            use_container_width=True,
+            hide_index=True
         )
 
     # === TAB 3: Correlation (Market Basket) ===
@@ -212,38 +225,36 @@ if df_merged is not None:
         st.subheader("Product Correlation (Frequently Bought Together)")
         st.markdown("Which products usually appear in the same order?")
 
-        # 1. Filter for multi-item orders only
         order_counts = df_merged_filtered.groupby('order_id')['selling_sku_id'].count()
         multi_item_orders = order_counts[order_counts > 1].index
         df_basket = df_merged_filtered[df_merged_filtered['order_id'].isin(multi_item_orders)]
 
         if not df_basket.empty:
-            # 2. Create combinations of products within orders
-            # Group products by order_id
             baskets = df_basket.groupby('order_id')['selling_sku_id'].apply(list)
-            
-            # Count pairs
             pair_counts = Counter()
             for products in baskets:
-                products = sorted(products) # Sort to ensure (A,B) is same as (B,A)
+                products = sorted(products)
                 pair_counts.update(combinations(products, 2))
             
-            # Convert to DataFrame
             df_pairs = pd.DataFrame(pair_counts.most_common(20), columns=['Product Pair', 'Frequency'])
-            
-            # Clean up tuple display
             df_pairs['Product A'] = df_pairs['Product Pair'].apply(lambda x: x[0])
             df_pairs['Product B'] = df_pairs['Product Pair'].apply(lambda x: x[1])
             
-            # Visual: Heatmap of top 10 products
             st.write("#### Top 20 Co-occurring Pairs")
-            st.dataframe(df_pairs[['Product A', 'Product B', 'Frequency']], use_container_width=True)
-
-            # Optional: Simple Network Graph or Heatmap if data is dense enough
-            # For simplicity, we use a scatter plot here to show strength
-            fig_corr = px.scatter(df_pairs, x='Product A', y='Product B', size='Frequency', 
-                                  color='Frequency', title="Correlation Strength",
-                                  height=600)
+            
+            # Simple Bubble Chart
+            fig_corr = px.scatter(
+                df_pairs, 
+                x='Product A', 
+                y='Product B', 
+                size='Frequency', 
+                color='Frequency', 
+                title="Correlation Strength",
+                height=600,
+                color_continuous_scale='Viridis'
+            )
+            # Adjust layout for better label reading
+            fig_corr.update_xaxes(tickangle=45)
             st.plotly_chart(fig_corr, use_container_width=True)
             
         else:
